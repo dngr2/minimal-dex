@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {IPair} from "./interfaces/IPair.sol";
@@ -97,7 +98,7 @@ contract Router {
         uint256 amountBMin,
         address to,
         uint256 deadline
-    ) external ensure(deadline) returns (uint256 amountA, uint256 amountB) {
+    ) public ensure(deadline) returns (uint256 amountA, uint256 amountB) {
         address pair = IFactory(factory).getPair(tokenA, tokenB);
         if (pair == address(0)) revert InvalidPath();
         IERC20(pair).safeTransferFrom(msg.sender, pair, liquidity);
@@ -106,6 +107,30 @@ contract Router {
         (amountA, amountB) = tokenA == token0 ? (amount0, amount1) : (amount1, amount0);
         if (amountA < amountAMin) revert InsufficientAAmount();
         if (amountB < amountBMin) revert InsufficientBAmount();
+    }
+
+    /// @notice Removes liquidity using an ERC-2612 permit signature to authorize the router to pull
+    ///         the LP tokens, saving the LP a separate `approve` transaction.
+    /// @param approveMax When true, the signature approves `type(uint256).max`; otherwise exactly `liquidity`.
+    /// @param v,r,s      The LP owner's EIP-2612 signature over the permit digest.
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address to,
+        uint256 deadline,
+        bool approveMax,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external returns (uint256 amountA, uint256 amountB) {
+        address pair = IFactory(factory).getPair(tokenA, tokenB);
+        if (pair == address(0)) revert InvalidPath();
+        uint256 value = approveMax ? type(uint256).max : liquidity;
+        IERC20Permit(pair).permit(msg.sender, address(this), value, deadline, v, r, s);
+        (amountA, amountB) = removeLiquidity(tokenA, tokenB, liquidity, amountAMin, amountBMin, to, deadline);
     }
 
     // --------------------------------------------------------------------- //

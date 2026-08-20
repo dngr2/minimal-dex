@@ -2,12 +2,16 @@
 pragma solidity 0.8.26;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IFactory} from "./interfaces/IFactory.sol";
 import {IPair} from "./interfaces/IPair.sol";
+import {IFlashSwapCallee} from "./interfaces/IFlashSwapCallee.sol";
+import {UQ112x112} from "./libraries/UQ112x112.sol";
 
 /// @title Pair
 /// @notice A constant-product (x*y=k) automated market maker for a single token pair.
@@ -16,8 +20,9 @@ import {IPair} from "./interfaces/IPair.sol";
 ///         Swap accounting uses balance deltas, making it safe for fee-on-transfer tokens.
 ///         A 0.30% fee is charged on every swap; a bounded protocol share of that fee
 ///         accrues to the factory's `feeTo` using the mint-on-liquidity-events (`kLast`) model.
-contract Pair is IPair, ERC20, ReentrancyGuard {
+contract Pair is IPair, ERC20Permit, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using UQ112x112 for uint224;
 
     /// @notice Minimum liquidity permanently locked on the first mint to prevent the
     ///         share-inflation (first-depositor) attack.
@@ -39,6 +44,15 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
     uint112 private reserve1;
     uint32 private blockTimestampLast;
 
+    /// @notice Time-weighted cumulative price accumulators (UQ112x112), Uniswap-V2 style.
+    /// @dev    price0CumulativeLast accumulates the price of token0 denominated in token1
+    ///         (i.e. reserve1/reserve0) integrated over time; price1CumulativeLast is the inverse.
+    ///         Each is incremented in `_update` by the elapsed-time-weighted price computed from the
+    ///         reserves that held BEFORE the update, only when timeElapsed > 0. Downstream oracles
+    ///         sample the difference of two checkpoints divided by the elapsed time to obtain a TWAP.
+    uint256 public price0CumulativeLast;
+    uint256 public price1CumulativeLast;
+
     /// @notice reserve0 * reserve1 as of the most recent liquidity event; used for protocol-fee accounting.
     uint256 public kLast;
 
@@ -53,8 +67,13 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
     error KInvariantViolated();
     error Overflow();
 
-    constructor() ERC20("Minimal DEX LP", "MDLP") {
+    constructor() ERC20("Minimal DEX LP", "MDLP") ERC20Permit("Minimal DEX LP") {
         factory = msg.sender;
+    }
+
+    /// @dev Disambiguates the ERC-2612 nonce accessor inherited via both IPair (IERC20Permit) and ERC20Permit.
+    function nonces(address owner) public view virtual override(IERC20Permit, ERC20Permit) returns (uint256) {
+        return super.nonces(owner);
     }
 
     /// @inheritdoc IPair
@@ -72,12 +91,24 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
         token1 = _token1;
     }
 
-    /// @dev Writes the reserves from the current balances and guards the uint112 range.
-    function _update(uint256 balance0, uint256 balance1) private {
+    /// @dev Writes the reserves from the current balances, guards the uint112 range, and advances
+    ///      the time-weighted cumulative-price accumulators using the reserves from BEFORE this
+    ///      update (`_reserve0`/`_reserve1`). The accumulators only move when time has elapsed since
+    ///      the last update and the pre-update reserves are both non-zero.
+    function _update(uint256 balance0, uint256 balance1, uint112 _reserve0, uint112 _reserve1) private {
         if (balance0 > type(uint112).max || balance1 > type(uint112).max) revert Overflow();
+        uint32 blockTimestamp = uint32(block.timestamp);
+        unchecked {
+            // Timestamp truncation and accumulator wrap-around are intentional (Uniswap-V2 semantics).
+            uint32 timeElapsed = blockTimestamp - blockTimestampLast;
+            if (timeElapsed > 0 && _reserve0 != 0 && _reserve1 != 0) {
+                price0CumulativeLast += uint256(UQ112x112.encode(_reserve1).uqdiv(_reserve0)) * timeElapsed;
+                price1CumulativeLast += uint256(UQ112x112.encode(_reserve0).uqdiv(_reserve1)) * timeElapsed;
+            }
+        }
         reserve0 = uint112(balance0);
         reserve1 = uint112(balance1);
-        blockTimestampLast = uint32(block.timestamp);
+        blockTimestampLast = blockTimestamp;
         emit Sync(reserve0, reserve1);
     }
 
@@ -127,7 +158,7 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
         if (liquidity == 0) revert InsufficientLiquidityMinted();
         _mint(to, liquidity);
 
-        _update(balance0, balance1);
+        _update(balance0, balance1, _reserve0, _reserve1);
         if (feeOn) kLast = uint256(reserve0) * uint256(reserve1);
         emit Mint(msg.sender, amount0, amount1);
     }
@@ -154,16 +185,32 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
         balance0 = IERC20(_token0).balanceOf(address(this));
         balance1 = IERC20(_token1).balanceOf(address(this));
 
-        _update(balance0, balance1);
+        _update(balance0, balance1, _reserve0, _reserve1);
         if (feeOn) kLast = uint256(reserve0) * uint256(reserve1);
         emit Burn(msg.sender, amount0, amount1, to);
     }
 
     /// @inheritdoc IPair
     /// @notice Swaps out `amount0Out`/`amount1Out` to `to`; the caller must have already sent the input.
-    /// @dev    Enforces the constant-product invariant AFTER deducting the 0.30% fee. Input amounts are
-    ///         derived from balance deltas, so fee-on-transfer input tokens are accounted correctly.
+    /// @dev    Backward-compatible no-data path (no flash-swap callback). Enforces the constant-product
+    ///         invariant AFTER deducting the 0.30% fee.
     function swap(uint256 amount0Out, uint256 amount1Out, address to) external nonReentrant {
+        _swap(amount0Out, amount1Out, to, "");
+    }
+
+    /// @notice Flash-swap-capable variant: when `data` is non-empty the outputs are transferred
+    ///         optimistically and `IFlashSwapCallee(to).flashSwapCall(msg.sender, ...)` is invoked
+    ///         before the invariant is checked. The borrower must return the borrowed tokens plus the
+    ///         0.30% fee (or supply the other side) so the post-callback balances still satisfy the
+    ///         constant-product invariant.
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external nonReentrant {
+        _swap(amount0Out, amount1Out, to, data);
+    }
+
+    /// @dev    Shared swap core. `data.length > 0` triggers the flash-swap callback. Input amounts are
+    ///         derived from balance deltas, so fee-on-transfer input tokens are accounted correctly, and
+    ///         the k-invariant is enforced on the balances observed AFTER any callback returns.
+    function _swap(uint256 amount0Out, uint256 amount1Out, address to, bytes memory data) private {
         if (amount0Out == 0 && amount1Out == 0) revert InsufficientOutputAmount();
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert InsufficientLiquidity();
@@ -174,6 +221,7 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
 
         if (amount0Out > 0) IERC20(_token0).safeTransfer(to, amount0Out);
         if (amount1Out > 0) IERC20(_token1).safeTransfer(to, amount1Out);
+        if (data.length > 0) IFlashSwapCallee(to).flashSwapCall(msg.sender, amount0Out, amount1Out, data);
 
         uint256 balance0 = IERC20(_token0).balanceOf(address(this));
         uint256 balance1 = IERC20(_token1).balanceOf(address(this));
@@ -189,7 +237,7 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
             revert KInvariantViolated();
         }
 
-        _update(balance0, balance1);
+        _update(balance0, balance1, _reserve0, _reserve1);
         emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
@@ -205,6 +253,6 @@ contract Pair is IPair, ERC20, ReentrancyGuard {
     /// @inheritdoc IPair
     /// @notice Forces the reserves to match the current balances (absorbs donations).
     function sync() external nonReentrant {
-        _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)));
+        _update(IERC20(token0).balanceOf(address(this)), IERC20(token1).balanceOf(address(this)), reserve0, reserve1);
     }
 }

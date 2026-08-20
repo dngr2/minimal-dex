@@ -49,6 +49,52 @@ routing, the exact protocol-fee split (on and off), the share-inflation and reen
 attacks, fee-on-transfer accounting, and a stateful invariant suite (k never decreases on
 swaps, `Σ LP balances == totalSupply`, balances ≥ reserves).
 
+## Expansion (v2): TWAP oracle, flash swaps, permit liquidity
+
+Three additive features layered on the v1 core. All v1 behavior and tests are unchanged.
+
+### Cumulative-price TWAP oracle
+
+`Pair` now maintains Uniswap-V2-style cumulative-price accumulators, `price0CumulativeLast`
+and `price1CumulativeLast` (UQ112.112 fixed-point). In `_update` (called by
+`mint`/`burn`/`swap`/`sync`), when `timeElapsed > 0` and the pre-update reserves are non-zero,
+each accumulator advances by the **elapsed-time-weighted price computed from the reserves that
+held _before_ the update**:
+
+```
+price0CumulativeLast += encode(reserve1).uqdiv(reserve0) * timeElapsed  // price of token0 in token1
+price1CumulativeLast += encode(reserve0).uqdiv(reserve1) * timeElapsed  // price of token1 in token0
+```
+
+`getReserves()` exposes `blockTimestampLast` for the elapsed-time delta. Timestamp truncation
+to `uint32` and accumulator wrap-around are intentional (`unchecked`), matching V2 semantics.
+
+`src/TwapOracle.sol` is a consumer bound to one pair. `update()` samples the pair's cumulatives
+(extrapolated to the current block via `currentCumulativePrices()`) and, once at least `period`
+seconds have elapsed, stores the average price over the window as
+`(cumulativeNow - cumulativeLast) / timeElapsed`. `consult(token, amountIn) -> amountOut`
+returns the TWAP-based quote. Because the average integrates price over the whole window, a
+single-block spot manipulation moves the reported TWAP by only ~`(1 block / window)`.
+
+### Flash swaps
+
+`Pair.swap(amount0Out, amount1Out, to, bytes data)` is added alongside the original
+`swap(amount0Out, amount1Out, to)` (which is preserved and simply forwards with empty data).
+When `data.length > 0`, the outputs are transferred optimistically and
+`IFlashSwapCallee(to).flashSwapCall(msg.sender, amount0Out, amount1Out, data)` is invoked before
+the k-invariant is checked on the **post-callback** balances. The borrower must return the
+borrowed tokens plus the 0.30% fee (or supply the other side); otherwise the invariant check
+reverts `KInvariantViolated`. The whole call remains `nonReentrant`. See
+`test/mocks/ExampleFlashSwapper.sol`.
+
+### ERC-2612 permit liquidity removal
+
+The `Pair` LP token now extends `ERC20Permit` (EIP-2612). `Router.removeLiquidityWithPermit(...)`
+lets an LP authorize the router to pull LP tokens with an off-chain signature (`v, r, s`,
+plus `approveMax`), removing liquidity without a separate `approve` transaction.
+
+New tests: `test/TwapOracle.t.sol`, `test/FlashSwap.t.sol`, `test/Permit.t.sol`.
+
 ## License
 
 MIT
