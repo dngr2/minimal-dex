@@ -1,17 +1,22 @@
 # Minimal DEX — Pitch
 
-A lean, audited-style constant-product AMM you can drop in and run. Three contracts, no
-external dependencies beyond OpenZeppelin, and a fee switch the protocol controls.
+A self-contained constant-product AMM you deploy and control end to end — a `Factory`, `Pair`
+pools, and a `Router`, plus an optional TWAP oracle. For teams that want their own auditable AMM,
+not a hook riding on someone else's shared pool manager. Depends only on OpenZeppelin.
 
-- **Familiar and safe.** Uniswap-V2 mechanics — the most battle-tested AMM design — written
-  clean-room with custom errors, CEI ordering, and reentrancy guards throughout.
-- **Earns fees.** Every swap charges 0.30%. LPs keep the bulk; a governance-set, hard-capped
-  protocol cut (≤ 50% of the swap fee) can be switched on to fund the protocol.
-- **Hard to grief.** First-deposit inflation is neutralized by the `MINIMUM_LIQUIDITY` lock;
-  swap accounting uses realized balance deltas, so fee-on-transfer tokens can't desync reserves.
-- **Proven, not promised.** Full Foundry suite: unit tests for every path plus a stateful
-  invariant run asserting k never decreases on swaps, supply always equals the sum of LP
-  balances, and balances always cover reserves. A mutation check confirms the fee math is
-  load-bearing.
+- **Safety enforced, not asserted.** The k-invariant is checked on fee-adjusted balances after
+  every swap (and after any flash-swap callback), and a stateful invariant run asserts k never
+  decreases across thousands of randomized operations. The `MINIMUM_LIQUIDITY` lock defeats the
+  first-deposit share-inflation attack.
+- **A manipulation-resistant price source built in.** The TWAP oracle integrates price over time,
+  so a single-block swap that moves the spot price by over 50% shifts the reported TWAP by under
+  2% (measured in the test suite).
+- **Bounded, opt-in protocol fee.** Every swap charges 0.30%; LPs keep it all unless a
+  governance-set protocol cut is switched on, and that cut is hard-capped at half the swap fee.
+- **v2 extras.** Flash swaps and ERC-2612 permit-based liquidity removal, layered on without
+  changing v1 behavior.
+- **Proven.** 40 Foundry tests, all green: unit coverage per path, attack tests
+  (inflation, reentrancy, fee-on-transfer), and three invariants — k non-decreasing, LP supply
+  equals the sum of balances, balances cover reserves. Fee math is mutation-tested.
 
-MIT licensed. `forge test` is green.
+MIT licensed. `forge test` is green. No mainnet deployment, volume, or TVL is claimed.
