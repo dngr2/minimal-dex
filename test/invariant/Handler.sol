@@ -90,6 +90,9 @@ contract Handler is Test {
         if (r0 == 0 || r1 == 0) return;
         (MockERC20 tin, uint256 reserveIn) =
             zeroForOne ? (MockERC20(pair.token0()), uint256(r0)) : (MockERC20(pair.token1()), uint256(r1));
+        // After heavy removeLiquidity the reserve can fall below the swap floor, making the
+        // bound range empty (max < min), which reverts under fail_on_revert=true. Skip cleanly.
+        if (reserveIn / 3 + 1 < 1e12) return;
         uint256 amountIn = bound(amtSeed, 1e12, reserveIn / 3 + 1);
 
         address[] memory path = new address[](2);
