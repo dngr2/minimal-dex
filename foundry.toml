@@ -1,4 +1,26 @@
+# Default (fast) profile: legacy codegen. Compiles ~11.8x faster cold than via-IR and is used
+# for local development and testing. The stack-depth sites were refactored to build under legacy.
 [profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.26"
+evm_version = "cancun"
+via_ir = false
+optimizer = true
+optimizer_runs = 200
+remappings = [
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+  "forge-std/=lib/forge-std/src/",
+]
+
+[profile.default.invariant]
+runs = 64
+depth = 200
+
+# Production / CI profile: via-IR codegen, the deployable bytecode. Build and test with
+# `FOUNDRY_PROFILE=ci forge build` / `FOUNDRY_PROFILE=ci forge test`.
+[profile.ci]
 src = "src"
 out = "out"
 libs = ["lib"]
@@ -12,6 +34,6 @@ remappings = [
   "forge-std/=lib/forge-std/src/",
 ]
 
-[profile.default.invariant]
+[profile.ci.invariant]
 runs = 64
 depth = 200

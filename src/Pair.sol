@@ -215,30 +215,46 @@ contract Pair is IPair, ERC20Permit, ReentrancyGuard {
         (uint112 _reserve0, uint112 _reserve1,) = getReserves();
         if (amount0Out >= _reserve0 || amount1Out >= _reserve1) revert InsufficientLiquidity();
 
-        address _token0 = token0;
-        address _token1 = token1;
-        if (to == _token0 || to == _token1) revert InvalidTo();
+        uint256 balance0;
+        uint256 balance1;
+        {
+            address _token0 = token0;
+            address _token1 = token1;
+            if (to == _token0 || to == _token1) revert InvalidTo();
 
-        if (amount0Out > 0) IERC20(_token0).safeTransfer(to, amount0Out);
-        if (amount1Out > 0) IERC20(_token1).safeTransfer(to, amount1Out);
-        if (data.length > 0) IFlashSwapCallee(to).flashSwapCall(msg.sender, amount0Out, amount1Out, data);
+            if (amount0Out > 0) IERC20(_token0).safeTransfer(to, amount0Out);
+            if (amount1Out > 0) IERC20(_token1).safeTransfer(to, amount1Out);
+            if (data.length > 0) IFlashSwapCallee(to).flashSwapCall(msg.sender, amount0Out, amount1Out, data);
 
-        uint256 balance0 = IERC20(_token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(_token1).balanceOf(address(this));
+            balance0 = IERC20(_token0).balanceOf(address(this));
+            balance1 = IERC20(_token1).balanceOf(address(this));
+        }
 
         uint256 amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
         uint256 amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
 
-        // 0.30% fee: require (balance - 0.003*in) product >= reserve product.
+        _checkKInvariant(balance0, balance1, amount0In, amount1In, _reserve0, _reserve1);
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
+    }
+
+    /// @dev Enforces the constant-product invariant net of the 0.30% fee on the post-swap balances.
+    ///      Requires (balance - 0.003*in) product >= reserve product (scaled by 1000^2).
+    function _checkKInvariant(
+        uint256 balance0,
+        uint256 balance1,
+        uint256 amount0In,
+        uint256 amount1In,
+        uint112 _reserve0,
+        uint112 _reserve1
+    ) private pure {
         uint256 balance0Adjusted = balance0 * 1000 - amount0In * 3;
         uint256 balance1Adjusted = balance1 * 1000 - amount1In * 3;
         if (balance0Adjusted * balance1Adjusted < uint256(_reserve0) * uint256(_reserve1) * (1000 * 1000)) {
             revert KInvariantViolated();
         }
-
-        _update(balance0, balance1, _reserve0, _reserve1);
-        emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
     }
 
     /// @inheritdoc IPair

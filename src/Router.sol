@@ -55,6 +55,14 @@ contract Router {
         uint256 deadline
     ) external ensure(deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         (amountA, amountB) = _addLiquidity(tokenA, tokenB, amountADesired, amountBDesired, amountAMin, amountBMin);
+        liquidity = _settleAddLiquidity(tokenA, tokenB, amountA, amountB, to);
+    }
+
+    /// @dev Pulls the settled amounts of both tokens from the caller into the pair and mints LP to `to`.
+    function _settleAddLiquidity(address tokenA, address tokenB, uint256 amountA, uint256 amountB, address to)
+        private
+        returns (uint256 liquidity)
+    {
         address pair = IFactory(factory).getPair(tokenA, tokenB);
         IERC20(tokenA).safeTransferFrom(msg.sender, pair, amountA);
         IERC20(tokenB).safeTransferFrom(msg.sender, pair, amountB);

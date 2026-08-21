@@ -7,5 +7,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
       - run: forge fmt --check
+      # Fast default (legacy) profile: quick build + test.
       - run: forge build
       - run: forge test -vv
+      # Production (via-IR) codegen: verify the deployable bytecode builds and passes.
+      - run: FOUNDRY_PROFILE=ci forge build
+      - run: FOUNDRY_PROFILE=ci forge test -vv
