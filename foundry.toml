@@ -17,6 +17,7 @@ remappings = [
 [profile.default.invariant]
 runs = 64
 depth = 200
+fail_on_revert = true
 
 # Production / CI profile: via-IR codegen, the deployable bytecode. Build and test with
 # `FOUNDRY_PROFILE=ci forge build` / `FOUNDRY_PROFILE=ci forge test`.
@@ -37,3 +38,4 @@ remappings = [
 [profile.ci.invariant]
 runs = 64
 depth = 200
+fail_on_revert = true

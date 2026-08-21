@@ -37,6 +37,8 @@ contract InvariantTest is Test {
     }
 
     /// @notice Total LP supply always equals the sum of every holder's balance.
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_supplyEqualsSumOfBalances() public view {
         uint256 sum = pair.balanceOf(DEAD) + pair.balanceOf(feeRecipient) + pair.balanceOf(address(router));
         uint256 n = handler.actorsLength();
@@ -49,6 +51,8 @@ contract InvariantTest is Test {
     }
 
     /// @notice The pair's token balances are never below its recorded reserves.
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_balancesCoverReserves() public view {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         assertGe(IERC20(pair.token0()).balanceOf(address(pair)), r0, "balance0 < reserve0");
@@ -56,6 +60,8 @@ contract InvariantTest is Test {
     }
 
     /// @notice No swap ever decreased k (fees make the product strictly non-decreasing on swaps).
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_swapsNeverDecreaseK() public view {
         assertEq(handler.ghost_swapKViolations(), 0, "a swap decreased k");
     }

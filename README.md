@@ -150,6 +150,33 @@ Fee-on-transfer tokens should interact with the `Pair` directly — the pair der
 from realized balance deltas, whereas the router's swap helpers assume non-fee-on-transfer
 tokens.
 
+## Deep dive (v2)
+
+A second adversarial pass audited the fund-critical paths — the k-invariant net of the 0.30%
+fee, LP mint/burn share math, the first-mint `MINIMUM_LIQUIDITY` lock and donation/inflation
+attack, `_mintFee` protocol accounting, TWAP accumulation, and reentrancy through the
+flash-swap callback and a malicious token. **No genuine bug was found**; the contracts hold to
+the constant-product design. The k-check matches Uniswap V2 exactly (`balanceAdjusted =
+balance*1000 - amountIn*3`), the generalized `_mintFee` formula reduces to V2's 1/6 split at
+`feeBps = 1666`, mint/burn round toward the pool, and the contract-wide `ReentrancyGuard`
+prevents the flash callback from re-entering any state-changing entry point.
+
+The pass instead **hardened coverage**:
+
+- `test/DeepDive.t.sol` probes the raw `Pair` (bypassing the Router) so the fee term is
+  exercised directly: requesting the full no-fee constant-product output — or even 1 wei above
+  the fee-respecting output — reverts `KInvariantViolated`; fuzzed swaps in both directions
+  never decrease k; fuzzed burns never return more than the proportional share.
+- The stateful invariants now run under `fail-on-revert = true` in both profiles — **12,800
+  calls, 0 reverts** per invariant — proving they are non-hollow.
+- A mutation check confirms the suite is load-bearing: dropping the fee term or halving the
+  k-threshold in `_checkKInvariant` each makes the DeepDive tests fail (reverted after).
+
+```bash
+forge test                     # 50 passing (legacy profile)
+FOUNDRY_PROFILE=ci forge test  # 50 passing (via-IR, the deployable bytecode)
+```
+
 ## License
 
 MIT. This is a clean-room implementation released for others to deploy and build on. No mainnet
